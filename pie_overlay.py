@@ -283,11 +283,14 @@ class OverlayWindow(QWidget):
         self.aux_menu = PieMenu(
             items=[
                 PieItem("ïœä∑", lambda: self.action("Auto IME")),
-                PieItem("Left", lambda: self.action("Left")),
                 PieItem("EN / JA", lambda: self.action("Change IME")),
-                PieItem("1 2 3", lambda: self.action("Numbers")),
-                PieItem("Mouse", lambda: self.action("Mouse Mode")),
+                PieItem("Left", lambda: self.action("Left")),
+                PieItem("\"", lambda: self.action("Dakuten")),
+                PieItem("ëÂ/è¨", lambda: self.action("Size Toggle")),
+                PieItem("ÅB", lambda: self.action("Handakuten")),
+                #PieItem("1 2 3", lambda: self.action("Numbers")),
                 PieItem("Right", lambda: self.action("Right")),
+                PieItem("Mouse", lambda: self.action("Mouse Mode")),
             ],
             centre=QPointF(900, 300),
         )

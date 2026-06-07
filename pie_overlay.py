@@ -332,9 +332,19 @@ class OverlayWindow(QWidget):
         self.right_stick_active = False
 
         self.controller = ControllerInput(deadzone=deadzone)
-        self.prev_left_state = (0.0, 0.0)
-        self.prev_right_state = (0.0, 0.0)
         self.prev_r1_state = False
+
+        # Joystick selection hysteresis.  Activation is deliberately higher
+        # than release so a noisy stick cannot rapidly enter/leave selection.
+        self.stick_activate_threshold = 35.0
+        self.stick_release_threshold = self.controller.deadzone
+        self.release_confirm_polls = 4
+
+        # If the right stick is used while the left stick is holding a kana
+        # group, the left stick is acting as a modifier.  Releasing it should
+        # not also type the group kana.
+        self.left_used_as_modifier = False
+        self.right_active_menu: Optional[PieMenu] = None
 
         # Debounce counters for release detection
         self.left_release_count = 0
@@ -342,7 +352,7 @@ class OverlayWindow(QWidget):
 
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll_controller)
-        self.poll_timer.start(8)
+        self.poll_timer.start(16)
 
     def poll_controller(self):
         left_state, right_state, r1_state = self.controller.get_controller_state()
@@ -352,9 +362,12 @@ class OverlayWindow(QWidget):
 
         self.prev_r1_state = r1_state
 
-        # Always feed the latest stick positions to handlers; handlers perform debounce
-        self.on_left_stick(*left_state)
-        self.on_right_stick(*right_state)
+        changed = False
+        changed |= self.on_left_stick(*left_state)
+        changed |= self.on_right_stick(*right_state)
+
+        if changed:
+            self.update()
 
     def action(self, name: str):
         print(f"Action fired: {name}")
@@ -368,97 +381,165 @@ class OverlayWindow(QWidget):
             menu.centre.y() + normalized_y * average_radius,
         )
 
-    def on_left_stick(self, stateX: float, stateY: float):
+    def _stick_index(self, menu: PieMenu, stateX: float, stateY: float, previous_index: Optional[int]) -> Optional[int]:
+        angle = math.degrees(math.atan2(-stateY, stateX)) % 360
+        new_index = menu.index_at_angle(angle)
+
+        # Angular hysteresis prevents boundary chatter, e.g. ra/ya flicker
+        # when the stick is close to the sector boundary.
+        if previous_index is not None and 0 <= previous_index < len(menu.items):
+            slice_angle = 360 / len(menu.items)
+            centre_angle = (menu.first_item_angle_deg + previous_index * slice_angle) % 360
+            delta = abs((angle - centre_angle + 180) % 360 - 180)
+            if delta <= (slice_angle / 2) + 8.0:
+                return previous_index
+
+        return new_index
+
+    def on_left_stick(self, stateX: float, stateY: float) -> bool:
         magnitude = math.hypot(stateX, stateY)
 
-        if magnitude > self.controller.deadzone:
-            # stick is being held out
-            self.left_stick_active = True
-            self.left_release_count = 0
-            angle = math.degrees(math.atan2(-stateY, stateX)) % 360
-            hover_index = self.left_menu.index_at_angle(angle)
+        # Not active yet: require a stronger push before entering selection.
+        if not self.left_stick_active and magnitude < self.stick_activate_threshold:
+            return False
+
+        if magnitude >= self.stick_release_threshold:
+            changed = False
+
+            if not self.left_stick_active:
+                self.left_stick_active = True
+                self.left_used_as_modifier = False
+                self.left_release_count = 0
+
+            hover_index = self._stick_index(
+                self.left_menu, stateX, stateY, self.left_candidate_index
+            )
 
             if hover_index != self.left_menu.hover_index:
                 self.left_menu.hover_index = hover_index
-                # switch right menu immediately when left sector changes
-                if hover_index is not None:
+                changed = True
+
+                # Switch the right menu immediately while the left stick is
+                # used as a modifier.  Do not change it underneath an active
+                # right-stick selection.
+                if hover_index is not None and not self.right_stick_active:
                     self.right_menu = self.kana_menus[hover_index]
                     self.right_menu.hover_index = None
-                    # clear any pending right-stick candidate when menu switches
                     self.right_candidate_index = None
                     self.right_release_count = 0
+                    self.right_active_menu = None
                     self.menus = [self.left_menu, self.right_menu]
+                    changed = True
 
             self.left_candidate_index = hover_index
-            self.update()
-        else:
-            # stick released or near centre: require a few stable polls to confirm
-            if self.left_stick_active:
-                self.left_release_count += 1
-                if self.left_release_count >= 3 and self.left_candidate_index is not None:
-                    idx = self.left_candidate_index
-                    label = (
-                        self.left_menu.items[idx].label
-                        if idx is not None and 0 <= idx < len(self.left_menu.items)
-                        else None
-                    )
-                    print(f"[CTRL] Left select idx={idx} label={label}")
-                    self.left_menu.hover_index = self.left_candidate_index
-                    self.left_menu.trigger_hovered()
-                    self.left_stick_active = False
-                    self.left_candidate_index = None
-                    self.left_menu.hover_index = None
-                    self.left_release_count = 0
-                    # when left releases, revert right menu to auxiliary menu
-                    self.right_menu = self.aux_menu
-                    self.menus = [self.left_menu, self.right_menu]
-                    self.right_candidate_index = None
-                    self.right_release_count = 0
-                    self.update()
+            self.left_release_count = 0
+            return changed
 
-    def on_right_stick(self, stateX: float, stateY: float):
+        # Below release threshold.  Require several consecutive polls so a
+        # momentary dip near the centre does not fire a selection.
+        if not self.left_stick_active:
+            return False
+
+        self.left_release_count += 1
+        if self.left_release_count < self.release_confirm_polls:
+            return False
+
+        # The left stick is a row/menu selector only.  It should not type a
+        # character on release; the right stick is the character selector.
+        self.left_stick_active = False
+        self.left_candidate_index = None
+        self.left_menu.hover_index = None
+        self.left_release_count = 0
+
+        # If the right stick is still active, keep its menu locked until it
+        # releases.  Otherwise return to the normal auxiliary menu.
+        if not self.right_stick_active:
+            self.right_menu = self.aux_menu
+            self.menus = [self.left_menu, self.right_menu]
+            self.right_candidate_index = None
+            self.right_release_count = 0
+            self.right_active_menu = None
+            self.left_used_as_modifier = False
+
+        return True
+
+    def on_right_stick(self, stateX: float, stateY: float) -> bool:
         magnitude = math.hypot(stateX, stateY)
 
-        if magnitude > self.controller.deadzone:
-            self.right_stick_active = True
-            self.right_release_count = 0
-            angle = math.degrees(math.atan2(-stateY, stateX)) % 360
-            hover_index = self.right_menu.index_at_angle(angle)
+        # Not active yet: require a stronger push before entering selection.
+        if not self.right_stick_active and magnitude < self.stick_activate_threshold:
+            return False
 
-            if hover_index != self.right_menu.hover_index:
-                self.right_menu.hover_index = hover_index
-                self.update()
+        if magnitude >= self.stick_release_threshold:
+            changed = False
+
+            if not self.right_stick_active:
+                self.right_stick_active = True
+                self.right_release_count = 0
+                self.right_active_menu = self.right_menu
+
+                if self.left_stick_active and self.right_active_menu is not self.aux_menu:
+                    self.left_used_as_modifier = True
+
+            active_menu = self.right_active_menu or self.right_menu
+            hover_index = self._stick_index(
+                active_menu, stateX, stateY, self.right_candidate_index
+            )
+
+            if hover_index != active_menu.hover_index:
+                active_menu.hover_index = hover_index
+                changed = True
 
             self.right_candidate_index = hover_index
-        else:
-            if self.right_stick_active:
-                self.right_release_count += 1
-                if self.right_release_count >= 3 and self.right_candidate_index is not None:
-                    idx = self.right_candidate_index
-                    label = (
-                        self.right_menu.items[idx].label
-                        if idx is not None and 0 <= idx < len(self.right_menu.items)
-                        else None
-                    )
-                    print(f"[CTRL] Right select idx={idx} label={label}")
-                    self.right_menu.hover_index = self.right_candidate_index
-                    self.right_menu.trigger_hovered()
-                    self.right_stick_active = False
-                    self.right_candidate_index = None
-                    self.right_menu.hover_index = None
-                    self.right_release_count = 0
-                    self.update()
+            self.right_release_count = 0
+            return changed
+
+        # Below release threshold.  Require several stable polls before firing.
+        if not self.right_stick_active:
+            return False
+
+        self.right_release_count += 1
+        if self.right_release_count < self.release_confirm_polls:
+            return False
+
+        active_menu = self.right_active_menu or self.right_menu
+        idx = self.right_candidate_index
+
+        if idx is not None:
+            label = (
+                active_menu.items[idx].label
+                if 0 <= idx < len(active_menu.items)
+                else None
+            )
+            print(f"[CTRL] Right select idx={idx} label={label}")
+            active_menu.hover_index = idx
+            active_menu.trigger_hovered()
+
+        self.right_stick_active = False
+        self.right_candidate_index = None
+        active_menu.hover_index = None
+        self.right_release_count = 0
+        self.right_active_menu = None
+
+        if not self.left_stick_active:
+            self.right_menu = self.aux_menu
+            self.menus = [self.left_menu, self.right_menu]
+            self.left_used_as_modifier = False
+
+        return True
 
     def resizeEvent(self, event):
         w = self.width()
         h = self.height()
 
         self.left_menu.set_centre(QPointF(w * 0.30, h * 0.50))
-        self.right_menu.set_centre(QPointF(w * 0.70, h * 0.50))
-        
-        # Update centres for all kana menus
+        right_centre = QPointF(w * 0.70, h * 0.50)
+
+        # Update every possible right-side menu, not only the one that happens
+        # to be visible during the resize event.
+        self.aux_menu.set_centre(right_centre)
         for menu in self.kana_menus:
-            menu.set_centre(QPointF(w * 0.70, h * 0.50))
+            menu.set_centre(right_centre)
 
         super().resizeEvent(event)
 

@@ -3,10 +3,20 @@ import math
 import threading
 
 
-deadzone = 15.0
+# Stick values from pydualsense are normally around -128..127.
+# This is used as the release threshold by the overlay; the overlay uses a
+# higher activation threshold to add hysteresis.
+deadzone = 18.0
 
 
 class ControllerInput:
+    """Thread-safe DualSense state cache.
+
+    pydualsense emits joystick/button callbacks from its own input thread.  The
+    Qt overlay should read a coherent snapshot from those callbacks instead of
+    repeatedly touching dualsense.state from the Qt thread.
+    """
+
     def __init__(self, deadzone: float = deadzone, verbose: bool = False):
         self.deadzone = deadzone
         self.dualsense = pydualsense(verbose)
@@ -17,10 +27,16 @@ class ControllerInput:
         self.right_state = (0.0, 0.0)
         self.r1_state = False
 
+        # Seed the cache once in case the sticks/buttons are already non-zero
+        # before the first change callback is emitted.
+        self._read_initial_state()
+
         self.dualsense.left_joystick_changed += self._on_left
         self.dualsense.right_joystick_changed += self._on_right
         self.dualsense.r1_changed += self._on_r1
 
+        # Expose the original pydualsense events for any other code that wants
+        # to attach extra handlers.
         self.left_joystick_changed = self.dualsense.left_joystick_changed
         self.right_joystick_changed = self.dualsense.right_joystick_changed
         self.cross_pressed = self.dualsense.cross_pressed
@@ -29,32 +45,36 @@ class ControllerInput:
         self.gyro_changed = self.dualsense.gyro_changed
         self.r1_changed = self.dualsense.r1_changed
 
+    def _read_initial_state(self):
+        try:
+            s = self.dualsense.state
+            with self.lock:
+                self.left_state = (float(s.LX), float(s.LY))
+                self.right_state = (float(s.RX), float(s.RY))
+                self.r1_state = bool(s.R1)
+        except Exception:
+            # Keep zero defaults if the library has not populated state yet.
+            pass
+
     def _on_left(self, x, y):
         with self.lock:
-            self.left_state = (x, y)
+            self.left_state = (float(x), float(y))
 
     def _on_right(self, x, y):
         with self.lock:
-            self.right_state = (x, y)
+            self.right_state = (float(x), float(y))
 
     def _on_r1(self, pressed):
         with self.lock:
-            self.r1_state = pressed
+            self.r1_state = bool(pressed)
 
     def get_controller_state(self):
+        """Return ((LX, LY), (RX, RY), R1) as one locked snapshot."""
         with self.lock:
             return self.left_state, self.right_state, self.r1_state
 
     def close(self):
         self.dualsense.close()
-
-    def get_controller_state(self):
-        """Return tuple: (LX,LY), (RX,RY), R1
-
-        Values are integers in the same range provided by pydualsense (-128..127).
-        """
-        s = self.dualsense.state
-        return (s.LX, s.LY), (s.RX, s.RY), bool(s.R1)
 
 
 def normalize_joystick(x, y):
@@ -64,27 +84,27 @@ def normalize_joystick(x, y):
 
 
 def cross_down(state):
-    print(f'cross {state}')
+    print(f"cross {state}")
 
 
 def circle_down(state):
-    print(f'circle {state}')
+    print(f"circle {state}")
 
 
 def dpad_down(state):
-    print(f'dpad {state}')
+    print(f"dpad {state}")
 
 
 def joystick(stateX, stateY):
     magnitude = math.sqrt(stateX**2 + stateY**2)
     angle = math.atan2(stateY, stateX) * (180 / math.pi)
-    print(f'lj angle {angle} magnitude {magnitude}')
+    print(f"lj angle {angle} magnitude {magnitude}")
 
 
 def rightJoystick(stateX, stateY):
     magnitude = math.sqrt(stateX**2 + stateY**2)
     angle = math.atan2(stateY, stateX) * (180 / math.pi)
-    print(f'rj angle {angle} magnitude {magnitude}')
+    print(f"rj angle {angle} magnitude {magnitude}")
 
 
 if __name__ == "__main__":
@@ -94,7 +114,8 @@ if __name__ == "__main__":
     dualsense.left_joystick_changed += joystick
     dualsense.right_joystick_changed += rightJoystick
 
-    while not dualsense.state.R1:
-        ...
-
-    dualsense.close()
+    try:
+        while not dualsense.state.R1:
+            pass
+    finally:
+        dualsense.close()

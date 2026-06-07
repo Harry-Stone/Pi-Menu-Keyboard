@@ -5,9 +5,11 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
+
+from input_reader import ControllerInput, deadzone
 
 
 @dataclass
@@ -55,6 +57,17 @@ class PieMenu:
         n = len(self.items)
         slice_angle = 360 / n
 
+        start_angle = self.first_item_angle_deg - slice_angle / 2
+        relative = (angle - start_angle) % 360
+
+        return int(relative // slice_angle)
+
+    def index_at_angle(self, angle: float) -> Optional[int]:
+        n = len(self.items)
+        if n == 0:
+            return None
+
+        slice_angle = 360 / n
         start_angle = self.first_item_angle_deg - slice_angle / 2
         relative = (angle - start_angle) % 360
 
@@ -311,11 +324,130 @@ class OverlayWindow(QWidget):
 
         self.left_menu = self.primary_kana
         self.right_menu = self.aux_menu
-
         self.menus = [self.left_menu, self.right_menu]
+
+        self.left_candidate_index: Optional[int] = None
+        self.right_candidate_index: Optional[int] = None
+        self.left_stick_active = False
+        self.right_stick_active = False
+
+        self.controller = ControllerInput(deadzone=deadzone)
+        self.prev_left_state = (0.0, 0.0)
+        self.prev_right_state = (0.0, 0.0)
+        self.prev_r1_state = False
+
+        # Debounce counters for release detection
+        self.left_release_count = 0
+        self.right_release_count = 0
+
+        self.poll_timer = QTimer(self)
+        self.poll_timer.timeout.connect(self.poll_controller)
+        self.poll_timer.start(8)
+
+    def poll_controller(self):
+        left_state, right_state, r1_state = self.controller.get_controller_state()
+
+        if r1_state and not self.prev_r1_state:
+            QApplication.quit()
+
+        self.prev_r1_state = r1_state
+
+        # Always feed the latest stick positions to handlers; handlers perform debounce
+        self.on_left_stick(*left_state)
+        self.on_right_stick(*right_state)
 
     def action(self, name: str):
         print(f"Action fired: {name}")
+
+    def _stick_to_point(self, menu: PieMenu, x: float, y: float) -> QPointF:
+        average_radius = (menu.inner_radius + menu.outer_radius) / 2
+        normalized_x = x / 128.0
+        normalized_y = y / 128.0
+        return QPointF(
+            menu.centre.x() + normalized_x * average_radius,
+            menu.centre.y() + normalized_y * average_radius,
+        )
+
+    def on_left_stick(self, stateX: float, stateY: float):
+        magnitude = math.hypot(stateX, stateY)
+
+        if magnitude > self.controller.deadzone:
+            # stick is being held out
+            self.left_stick_active = True
+            self.left_release_count = 0
+            angle = math.degrees(math.atan2(-stateY, stateX)) % 360
+            hover_index = self.left_menu.index_at_angle(angle)
+
+            if hover_index != self.left_menu.hover_index:
+                self.left_menu.hover_index = hover_index
+                # switch right menu immediately when left sector changes
+                if hover_index is not None:
+                    self.right_menu = self.kana_menus[hover_index]
+                    self.right_menu.hover_index = None
+                    # clear any pending right-stick candidate when menu switches
+                    self.right_candidate_index = None
+                    self.right_release_count = 0
+                    self.menus = [self.left_menu, self.right_menu]
+
+            self.left_candidate_index = hover_index
+            self.update()
+        else:
+            # stick released or near centre: require a few stable polls to confirm
+            if self.left_stick_active:
+                self.left_release_count += 1
+                if self.left_release_count >= 3 and self.left_candidate_index is not None:
+                    idx = self.left_candidate_index
+                    label = (
+                        self.left_menu.items[idx].label
+                        if idx is not None and 0 <= idx < len(self.left_menu.items)
+                        else None
+                    )
+                    print(f"[CTRL] Left select idx={idx} label={label}")
+                    self.left_menu.hover_index = self.left_candidate_index
+                    self.left_menu.trigger_hovered()
+                    self.left_stick_active = False
+                    self.left_candidate_index = None
+                    self.left_menu.hover_index = None
+                    self.left_release_count = 0
+                    # when left releases, revert right menu to auxiliary menu
+                    self.right_menu = self.aux_menu
+                    self.menus = [self.left_menu, self.right_menu]
+                    self.right_candidate_index = None
+                    self.right_release_count = 0
+                    self.update()
+
+    def on_right_stick(self, stateX: float, stateY: float):
+        magnitude = math.hypot(stateX, stateY)
+
+        if magnitude > self.controller.deadzone:
+            self.right_stick_active = True
+            self.right_release_count = 0
+            angle = math.degrees(math.atan2(-stateY, stateX)) % 360
+            hover_index = self.right_menu.index_at_angle(angle)
+
+            if hover_index != self.right_menu.hover_index:
+                self.right_menu.hover_index = hover_index
+                self.update()
+
+            self.right_candidate_index = hover_index
+        else:
+            if self.right_stick_active:
+                self.right_release_count += 1
+                if self.right_release_count >= 3 and self.right_candidate_index is not None:
+                    idx = self.right_candidate_index
+                    label = (
+                        self.right_menu.items[idx].label
+                        if idx is not None and 0 <= idx < len(self.right_menu.items)
+                        else None
+                    )
+                    print(f"[CTRL] Right select idx={idx} label={label}")
+                    self.right_menu.hover_index = self.right_candidate_index
+                    self.right_menu.trigger_hovered()
+                    self.right_stick_active = False
+                    self.right_candidate_index = None
+                    self.right_menu.hover_index = None
+                    self.right_release_count = 0
+                    self.update()
 
     def resizeEvent(self, event):
         w = self.width()
@@ -376,6 +508,10 @@ class OverlayWindow(QWidget):
             QApplication.quit()
 
         super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self.controller.close()
+        super().closeEvent(event)
 
 
 def main():

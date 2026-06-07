@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: shift_jis -*-
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -28,37 +29,125 @@ class KanaToken:
 
 
 class KeyboardTyper:
-    """Send keystrokes to the currently focused application/IME."""
+    """Send keystrokes to the currently focused application/IME.
+
+    X11:     xdotool is preferred.
+    Wayland: ydotool is preferred because it injects through /dev/uinput.
+             wtype is also supported for wlroots-based compositors, but it is
+             usually not enough on GNOME Wayland.
+    """
+
+    YDOTOOL_KEYCODES = {
+        "BackSpace": 14,
+        "Left": 105,
+        "Right": 106,
+        "space": 57,
+        "Space": 57,
+        "Zenkaku_Hankaku": 85,
+    }
+
+    WTYPE_KEYNAMES = {
+        "BackSpace": "BackSpace",
+        "Left": "Left",
+        "Right": "Right",
+        "space": "space",
+        "Space": "space",
+        "Zenkaku_Hankaku": "Zenkaku_Hankaku",
+    }
 
     def __init__(self):
+        self.session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        self.display = os.environ.get("DISPLAY", "")
+        self.wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
+        self.available = {
+            "xdotool": shutil.which("xdotool") is not None,
+            "ydotool": shutil.which("ydotool") is not None,
+            "wtype": shutil.which("wtype") is not None,
+        }
         self.backend = self._detect_backend()
         self.warned = False
+
+        print(
+            "[KEYBOARD] session="
+            f"{self.session_type or 'unknown'} DISPLAY={self.display or '-'} "
+            f"WAYLAND_DISPLAY={self.wayland_display or '-'}"
+        )
+        print(
+            "[KEYBOARD] available backends: "
+            + ", ".join(f"{name}={yes}" for name, yes in self.available.items())
+        )
+
+        forced_backend = os.environ.get("PIE_KEYBOARD_BACKEND", "").strip().lower()
+        if forced_backend:
+            print(f"[KEYBOARD] PIE_KEYBOARD_BACKEND={forced_backend}")
+
         if self.backend:
             print(f"[KEYBOARD] Using {self.backend} for keyboard output")
         else:
-            print("[KEYBOARD] No keyboard output backend found. Install xdotool on X11: sudo apt install xdotool")
+            print("[KEYBOARD] No keyboard output backend found")
+
+        if self.session_type == "wayland" and self.backend == "xdotool":
+            print(
+                "[KEYBOARD] WARNING: xdotool is X11-only. On Wayland it may "
+                "run without errors but not type into normal applications. "
+                "Use ydotool, or log into an Ubuntu on Xorg session."
+            )
+
+        if self.session_type == "wayland" and self.backend == "wtype":
+            print(
+                "[KEYBOARD] WARNING: wtype only works on compositors that "
+                "support the virtual-keyboard protocol. GNOME Wayland usually "
+                "needs ydotool instead."
+            )
 
     def _detect_backend(self) -> Optional[str]:
-        if shutil.which("xdotool"):
-            return "xdotool"
-        if shutil.which("wtype"):
-            return "wtype"
+        forced = os.environ.get("PIE_KEYBOARD_BACKEND", "").strip().lower()
+        if forced:
+            if forced in self.available and self.available[forced]:
+                return forced
+            print(f"[KEYBOARD] Requested backend '{forced}' is not installed")
+
+        if self.session_type == "wayland":
+            # Prefer ydotool on Wayland because it uses uinput rather than X11.
+            for backend in ("ydotool", "wtype", "xdotool"):
+                if self.available[backend]:
+                    return backend
+        else:
+            for backend in ("xdotool", "ydotool", "wtype"):
+                if self.available[backend]:
+                    return backend
+
         return None
 
-    def _run(self, args: list[str]):
+    def _run(self, args: list[str]) -> bool:
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 args,
                 check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
             )
         except Exception as exc:
             print(f"[KEYBOARD] Failed to run {' '.join(args)}: {exc}")
+            return False
+
+        if completed.returncode != 0:
+            print(f"[KEYBOARD] Command failed ({completed.returncode}): {' '.join(args)}")
+            if completed.stderr.strip():
+                print(f"[KEYBOARD] stderr: {completed.stderr.strip()}")
+            if completed.stdout.strip():
+                print(f"[KEYBOARD] stdout: {completed.stdout.strip()}")
+            return False
+
+        return True
 
     def _warn_missing_backend(self):
         if not self.warned:
-            print("[KEYBOARD] Cannot type: install xdotool, or wtype if using a compatible Wayland session")
+            print(
+                "[KEYBOARD] Cannot type. On X11 install xdotool. On Wayland "
+                "install/configure ydotool, or use an Ubuntu on Xorg session."
+            )
             self.warned = True
 
     def type_text(self, text: str):
@@ -66,7 +155,10 @@ class KeyboardTyper:
             return
 
         if self.backend == "xdotool":
-            self._run(["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text])
+            # --delay 10 is slightly more reliable with IMEs than a 0 ms delay.
+            self._run(["xdotool", "type", "--clearmodifiers", "--delay", "10", "--", text])
+        elif self.backend == "ydotool":
+            self._run(["ydotool", "type", text])
         elif self.backend == "wtype":
             self._run(["wtype", text])
         else:
@@ -78,9 +170,19 @@ class KeyboardTyper:
 
         if self.backend == "xdotool":
             self._run(["xdotool", "key", "--clearmodifiers"] + [key_name] * repeat)
-        elif self.backend == "wtype":
+        elif self.backend == "ydotool":
+            code = self.YDOTOOL_KEYCODES.get(key_name)
+            if code is None:
+                print(f"[KEYBOARD] ydotool key not mapped: {key_name}")
+                return
+            args = ["ydotool", "key"]
             for _ in range(repeat):
-                self._run(["wtype", "-k", key_name])
+                args.extend([f"{code}:1", f"{code}:0"])
+            self._run(args)
+        elif self.backend == "wtype":
+            key = self.WTYPE_KEYNAMES.get(key_name, key_name)
+            for _ in range(repeat):
+                self._run(["wtype", "-k", key])
         else:
             self._warn_missing_backend()
 

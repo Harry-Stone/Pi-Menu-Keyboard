@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: shift_jis -*-
 import math
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -16,6 +18,129 @@ from input_reader import ControllerInput, deadzone
 class PieItem:
     label: str
     callback: Optional[Callable[[], None]] = None
+
+
+@dataclass
+class KanaToken:
+    romaji: str
+    label: str
+    delete_units: int = 1
+
+
+class KeyboardTyper:
+    """Send keystrokes to the currently focused application/IME."""
+
+    def __init__(self):
+        self.backend = self._detect_backend()
+        self.warned = False
+        if self.backend:
+            print(f"[KEYBOARD] Using {self.backend} for keyboard output")
+        else:
+            print("[KEYBOARD] No keyboard output backend found. Install xdotool on X11: sudo apt install xdotool")
+
+    def _detect_backend(self) -> Optional[str]:
+        if shutil.which("xdotool"):
+            return "xdotool"
+        if shutil.which("wtype"):
+            return "wtype"
+        return None
+
+    def _run(self, args: list[str]):
+        try:
+            subprocess.run(
+                args,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            print(f"[KEYBOARD] Failed to run {' '.join(args)}: {exc}")
+
+    def _warn_missing_backend(self):
+        if not self.warned:
+            print("[KEYBOARD] Cannot type: install xdotool, or wtype if using a compatible Wayland session")
+            self.warned = True
+
+    def type_text(self, text: str):
+        if not text:
+            return
+
+        if self.backend == "xdotool":
+            self._run(["xdotool", "type", "--clearmodifiers", "--delay", "0", "--", text])
+        elif self.backend == "wtype":
+            self._run(["wtype", text])
+        else:
+            self._warn_missing_backend()
+
+    def key(self, key_name: str, repeat: int = 1):
+        if repeat <= 0:
+            return
+
+        if self.backend == "xdotool":
+            self._run(["xdotool", "key", "--clearmodifiers"] + [key_name] * repeat)
+        elif self.backend == "wtype":
+            for _ in range(repeat):
+                self._run(["wtype", "-k", key_name])
+        else:
+            self._warn_missing_backend()
+
+    def backspace(self, repeat: int = 1):
+        self.key("BackSpace", repeat)
+
+
+ROMAJI_TO_KANA = {
+    "a": "‚ ", "i": "‚¢", "u": "‚¤", "e": "‚¦", "o": "‚¨",
+    "ka": "‚©", "ki": "‚«", "ku": "‚­", "ke": "‚¯", "ko": "‚±",
+    "ga": "‚ª", "gi": "‚¬", "gu": "‚®", "ge": "‚°", "go": "‚²",
+    "sa": "‚³", "si": "‚µ", "su": "‚·", "se": "‚¹", "so": "‚»",
+    "za": "‚´", "ji": "‚¶", "zu": "‚¸", "ze": "‚º", "zo": "‚¼",
+    "ta": "‚½", "ti": "‚¿", "tu": "‚Â", "te": "‚Ä", "to": "‚Æ",
+    "da": "‚¾", "de": "‚Å", "do": "‚Ç",
+    "na": "‚È", "ni": "‚É", "nu": "‚Ê", "ne": "‚Ë", "no": "‚Ì",
+    "ha": "‚Í", "hi": "‚Ð", "hu": "‚Ó", "he": "‚Ö", "ho": "‚Ù",
+    "ba": "‚Î", "bi": "‚Ñ", "bu": "‚Ô", "be": "‚×", "bo": "‚Ú",
+    "pa": "‚Ï", "pi": "‚Ò", "pu": "‚Õ", "pe": "‚Ø", "po": "‚Û",
+    "ma": "‚Ü", "mi": "‚Ý", "mu": "‚Þ", "me": "‚ß", "mo": "‚à",
+    "ya": "‚â", "yu": "‚ä", "yo": "‚æ",
+    "ra": "‚ç", "ri": "‚è", "ru": "‚é", "re": "‚ê", "ro": "‚ë",
+    "wa": "‚í", "wo": "‚ð", "n": "‚ñ",
+}
+
+DAKUTEN_MAP = {
+    "ka": "ga", "ki": "gi", "ku": "gu", "ke": "ge", "ko": "go",
+    "sa": "za", "si": "ji", "su": "zu", "se": "ze", "so": "zo",
+    "ta": "da", "ti": "ji", "tu": "zu", "te": "de", "to": "do",
+    "ha": "ba", "hi": "bi", "hu": "bu", "he": "be", "ho": "bo",
+}
+
+HANDAKUTEN_MAP = {
+    "ha": "pa", "hi": "pi", "hu": "pu", "he": "pe", "ho": "po",
+    "ba": "pa", "bi": "pi", "bu": "pu", "be": "pe", "bo": "po",
+}
+
+YOOON_PREFIX_MAP = {
+    "ki": "ky", "gi": "gy",
+    "si": "sh", "ji": "j",
+    "ti": "ch",
+    "ni": "ny",
+    "hi": "hy", "bi": "by", "pi": "py",
+    "mi": "my",
+    "ri": "ry",
+}
+
+YOOON_VOWEL_MAP = {"ya": "a", "yu": "u", "yo": "o"}
+SMALL_Y_LABEL_MAP = {"ya": "‚á", "yu": "‚ã", "yo": "‚å"}
+SMALL_KANA_MAP = {
+    "a": ("xa", "‚Ÿ"),
+    "i": ("xi", "‚¡"),
+    "u": ("xu", "‚£"),
+    "e": ("xe", "‚¥"),
+    "o": ("xo", "‚§"),
+    "ya": ("xya", "‚á"),
+    "yu": ("xyu", "‚ã"),
+    "yo": ("xyo", "‚å"),
+    "tu": ("xtu", "‚Á"),
+}
 
 
 class PieMenu:
@@ -49,17 +174,12 @@ class PieMenu:
 
         dx = point.x() - self.centre.x()
         dy = point.y() - self.centre.y()
-
-        # Screen coords: +x right, +y down.
-        # Convert to mathematical angle: 0 right, 90 up.
         angle = math.degrees(math.atan2(-dy, dx)) % 360
 
         n = len(self.items)
         slice_angle = 360 / n
-
         start_angle = self.first_item_angle_deg - slice_angle / 2
         relative = (angle - start_angle) % 360
-
         return int(relative // slice_angle)
 
     def index_at_angle(self, angle: float) -> Optional[int]:
@@ -70,7 +190,6 @@ class PieMenu:
         slice_angle = 360 / n
         start_angle = self.first_item_angle_deg - slice_angle / 2
         relative = (angle - start_angle) % 360
-
         return int(relative // slice_angle)
 
     def trigger_hovered(self):
@@ -79,7 +198,6 @@ class PieMenu:
 
         item = self.items[self.hover_index]
         print(f"Selected: {item.label}")
-
         if item.callback:
             item.callback()
 
@@ -109,7 +227,6 @@ class PieMenu:
         path.arcTo(outer, start_angle, sweep_angle)
         path.arcTo(inner, start_angle + sweep_angle, -sweep_angle)
         path.closeSubpath()
-
         return path
 
     def draw(self, painter: QPainter):
@@ -118,58 +235,69 @@ class PieMenu:
         n = len(self.items)
         slice_angle = 360 / n
 
-        base_colour = QColor(30, 30, 30, 185)
-        hover_colour = QColor(80, 130, 220, 230)
-        outline_colour = QColor(230, 230, 230, 170)
-        text_colour = QColor(255, 255, 255)
+        base_colour = QColor(30, 30, 30, 150)
+        hover_colour = QColor(80, 130, 220, 220)
+        outline_colour = QColor(230, 230, 230, 150)
+        text_colour = QColor(255, 255, 255, 235)
 
         painter.setPen(QPen(outline_colour, 1.5))
 
         for i, item in enumerate(self.items):
             path = self._wedge_path(i)
-
-            if i == self.hover_index:
-                painter.setBrush(hover_colour)
-            else:
-                painter.setBrush(base_colour)
-
+            painter.setBrush(hover_colour if i == self.hover_index else base_colour)
             painter.drawPath(path)
 
-            # Draw label
             centre_angle = self.first_item_angle_deg + i * slice_angle
             rad = math.radians(centre_angle)
-
             label_radius = (self.inner_radius + self.outer_radius) / 2
             x = self.centre.x() + math.cos(rad) * label_radius
             y = self.centre.y() - math.sin(rad) * label_radius
-
             label_rect = QRectF(x - 45, y - 18, 90, 36)
 
             painter.setPen(text_colour)
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, item.label)
             painter.setPen(QPen(outline_colour, 1.5))
 
-        # Draw centre circle
-        painter.setBrush(QColor(10, 10, 10, 210))
+        painter.setBrush(QColor(10, 10, 10, 170))
         painter.setPen(QPen(outline_colour, 1.5))
         painter.drawEllipse(self.centre, self.inner_radius, self.inner_radius)
 
 
 class OverlayWindow(QWidget):
+    WINDOW_WIDTH = 760
+    WINDOW_HEIGHT = 360
+    WINDOW_MARGIN = 16
+
     def __init__(self):
         super().__init__()
 
         self.setWindowTitle("Pie Menu Overlay")
 
-        self.setWindowFlags(
+        flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
+        no_focus_flag = getattr(Qt.WindowType, "WindowDoesNotAcceptFocus", None)
+        if no_focus_flag is not None:
+            flags |= no_focus_flag
+        self.setWindowFlags(flags)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        show_without_activating = getattr(Qt.WidgetAttribute, "WA_ShowWithoutActivating", None)
+        if show_without_activating is not None:
+            self.setAttribute(show_without_activating, True)
+        x11_no_focus = getattr(Qt.WidgetAttribute, "WA_X11DoNotAcceptFocus", None)
+        if x11_no_focus is not None:
+            self.setAttribute(x11_no_focus, True)
+
+        self.setWindowOpacity(0.92)
         self.setMouseTracking(True)
+        self.resize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
+
+        self.keyboard = KeyboardTyper()
+        self.kana_buffer: list[KanaToken] = []
 
         self.primary_kana = PieMenu(
             items=[
@@ -298,17 +426,15 @@ class OverlayWindow(QWidget):
                 PieItem("•ÏŠ·", lambda: self.action("Auto IME")),
                 PieItem("EN / JA", lambda: self.action("Change IME")),
                 PieItem("Left", lambda: self.action("Left")),
-                PieItem("\"", lambda: self.action("Dakuten")),
+                PieItem("J", lambda: self.action("Dakuten")),
                 PieItem("‘å/¬", lambda: self.action("Size Toggle")),
-                PieItem("B", lambda: self.action("Handakuten")),
-                #PieItem("1 2 3", lambda: self.action("Numbers")),
+                PieItem("K", lambda: self.action("Handakuten")),
                 PieItem("Right", lambda: self.action("Right")),
                 PieItem("Mouse", lambda: self.action("Mouse Mode")),
             ],
             centre=QPointF(900, 300),
         )
 
-        # Mapping from left menu index to right menu
         self.kana_menus = [
             self.a_menu,
             self.ka_menu,
@@ -334,25 +460,24 @@ class OverlayWindow(QWidget):
         self.controller = ControllerInput(deadzone=deadzone)
         self.prev_r1_state = False
 
-        # Joystick selection hysteresis.  Activation is deliberately higher
-        # than release so a noisy stick cannot rapidly enter/leave selection.
         self.stick_activate_threshold = 35.0
         self.stick_release_threshold = self.controller.deadzone
         self.release_confirm_polls = 4
 
-        # If the right stick is used while the left stick is holding a kana
-        # group, the left stick is acting as a modifier.  Releasing it should
-        # not also type the group kana.
         self.left_used_as_modifier = False
         self.right_active_menu: Optional[PieMenu] = None
 
-        # Debounce counters for release detection
         self.left_release_count = 0
         self.right_release_count = 0
 
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self.poll_controller)
         self.poll_timer.start(16)
+
+    def position_top_right(self, screen_rect: QRectF):
+        x = screen_rect.right() - self.WINDOW_WIDTH - self.WINDOW_MARGIN + 1
+        y = screen_rect.top() + self.WINDOW_MARGIN
+        self.setGeometry(int(x), int(y), self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
 
     def poll_controller(self):
         left_state, right_state, r1_state = self.controller.get_controller_state()
@@ -372,21 +497,119 @@ class OverlayWindow(QWidget):
     def action(self, name: str):
         print(f"Action fired: {name}")
 
-    def _stick_to_point(self, menu: PieMenu, x: float, y: float) -> QPointF:
-        average_radius = (menu.inner_radius + menu.outer_radius) / 2
-        normalized_x = x / 128.0
-        normalized_y = y / 128.0
-        return QPointF(
-            menu.centre.x() + normalized_x * average_radius,
-            menu.centre.y() + normalized_y * average_radius,
-        )
+        if name in ROMAJI_TO_KANA:
+            self.type_kana(name, ROMAJI_TO_KANA[name])
+            return
+
+        if name == "Dakuten":
+            self.apply_dakuten()
+        elif name == "Handakuten":
+            self.apply_handakuten()
+        elif name == "Size Toggle":
+            self.apply_size_toggle()
+        elif name == "Auto IME":
+            self.keyboard.key("space")
+        elif name == "Change IME":
+            self.keyboard.key("Zenkaku_Hankaku")
+        elif name == "Left":
+            self.keyboard.key("Left")
+        elif name == "Right":
+            self.keyboard.key("Right")
+        elif name == "Mouse Mode":
+            print("[AUX] Mouse Mode selected, no action bound yet")
+        else:
+            print(f"[AUX] No action bound for {name}")
+
+    def type_kana(self, romaji: str, label: str):
+        self.keyboard.type_text(romaji)
+        self._push_kana(KanaToken(romaji=romaji, label=label, delete_units=1))
+        self._print_buffer()
+
+    def _push_kana(self, token: KanaToken):
+        self.kana_buffer.append(token)
+        self.kana_buffer = self.kana_buffer[-2:]
+
+    def _print_buffer(self):
+        text = " ".join(f"{t.label}/{t.romaji}" for t in self.kana_buffer)
+        print(f"[BUFFER] {text}")
+
+    def _replace_last_token(self, new_romaji: str, new_label: str):
+        if not self.kana_buffer:
+            return
+        old = self.kana_buffer[-1]
+        self.keyboard.backspace(old.delete_units)
+        self.keyboard.type_text(new_romaji)
+        self.kana_buffer[-1] = KanaToken(new_romaji, new_label, delete_units=1)
+        self._print_buffer()
+
+    def apply_dakuten(self):
+        if not self.kana_buffer:
+            print("[DAKUTEN] No kana in buffer")
+            return
+
+        old = self.kana_buffer[-1]
+        new_romaji = DAKUTEN_MAP.get(old.romaji)
+        if not new_romaji:
+            print(f"[DAKUTEN] Cannot voice {old.label}/{old.romaji}")
+            return
+
+        self._replace_last_token(new_romaji, ROMAJI_TO_KANA.get(new_romaji, new_romaji))
+
+    def apply_handakuten(self):
+        if not self.kana_buffer:
+            print("[HANDAKUTEN] No kana in buffer")
+            return
+
+        old = self.kana_buffer[-1]
+        new_romaji = HANDAKUTEN_MAP.get(old.romaji)
+        if not new_romaji:
+            print(f"[HANDAKUTEN] Cannot handaku {old.label}/{old.romaji}")
+            return
+
+        self._replace_last_token(new_romaji, ROMAJI_TO_KANA.get(new_romaji, new_romaji))
+
+    def apply_size_toggle(self):
+        if len(self.kana_buffer) >= 2:
+            base = self.kana_buffer[-2]
+            y = self.kana_buffer[-1]
+            prefix = YOOON_PREFIX_MAP.get(base.romaji)
+            vowel = YOOON_VOWEL_MAP.get(y.romaji)
+
+            if prefix and vowel:
+                combo_romaji = prefix + vowel
+                combo_label = base.label + SMALL_Y_LABEL_MAP[y.romaji]
+                backspaces = base.delete_units + y.delete_units
+                print(
+                    f"[SIZE] Combine {base.romaji} + {y.romaji}: "
+                    f"BackSpace x{backspaces}, type {combo_romaji}"
+                )
+                self.keyboard.backspace(backspaces)
+                self.keyboard.type_text(combo_romaji)
+                self.kana_buffer = [KanaToken(combo_romaji, combo_label, delete_units=2)]
+                self._print_buffer()
+                return
+
+        if self.kana_buffer:
+            old = self.kana_buffer[-1]
+            small = SMALL_KANA_MAP.get(old.romaji)
+            if small:
+                new_romaji, new_label = small
+                print(
+                    f"[SIZE] Small kana {old.romaji}: "
+                    f"BackSpace x{old.delete_units}, type {new_romaji}"
+                )
+                self.keyboard.backspace(old.delete_units)
+                self.keyboard.type_text(new_romaji)
+                self.kana_buffer[-1] = KanaToken(new_romaji, new_label, delete_units=1)
+                self._print_buffer()
+                return
+
+        print("[SIZE] No valid small-kana or yoon combination in buffer")
 
     def _stick_index(self, menu: PieMenu, stateX: float, stateY: float, previous_index: Optional[int]) -> Optional[int]:
         angle = math.degrees(math.atan2(-stateY, stateX)) % 360
         new_index = menu.index_at_angle(angle)
 
-        # Angular hysteresis prevents boundary chatter, e.g. ra/ya flicker
-        # when the stick is close to the sector boundary.
         if previous_index is not None and 0 <= previous_index < len(menu.items):
             slice_angle = 360 / len(menu.items)
             centre_angle = (menu.first_item_angle_deg + previous_index * slice_angle) % 360
@@ -399,7 +622,6 @@ class OverlayWindow(QWidget):
     def on_left_stick(self, stateX: float, stateY: float) -> bool:
         magnitude = math.hypot(stateX, stateY)
 
-        # Not active yet: require a stronger push before entering selection.
         if not self.left_stick_active and magnitude < self.stick_activate_threshold:
             return False
 
@@ -411,17 +633,12 @@ class OverlayWindow(QWidget):
                 self.left_used_as_modifier = False
                 self.left_release_count = 0
 
-            hover_index = self._stick_index(
-                self.left_menu, stateX, stateY, self.left_candidate_index
-            )
+            hover_index = self._stick_index(self.left_menu, stateX, stateY, self.left_candidate_index)
 
             if hover_index != self.left_menu.hover_index:
                 self.left_menu.hover_index = hover_index
                 changed = True
 
-                # Switch the right menu immediately while the left stick is
-                # used as a modifier.  Do not change it underneath an active
-                # right-stick selection.
                 if hover_index is not None and not self.right_stick_active:
                     self.right_menu = self.kana_menus[hover_index]
                     self.right_menu.hover_index = None
@@ -435,8 +652,6 @@ class OverlayWindow(QWidget):
             self.left_release_count = 0
             return changed
 
-        # Below release threshold.  Require several consecutive polls so a
-        # momentary dip near the centre does not fire a selection.
         if not self.left_stick_active:
             return False
 
@@ -444,15 +659,11 @@ class OverlayWindow(QWidget):
         if self.left_release_count < self.release_confirm_polls:
             return False
 
-        # The left stick is a row/menu selector only.  It should not type a
-        # character on release; the right stick is the character selector.
         self.left_stick_active = False
         self.left_candidate_index = None
         self.left_menu.hover_index = None
         self.left_release_count = 0
 
-        # If the right stick is still active, keep its menu locked until it
-        # releases.  Otherwise return to the normal auxiliary menu.
         if not self.right_stick_active:
             self.right_menu = self.aux_menu
             self.menus = [self.left_menu, self.right_menu]
@@ -466,7 +677,6 @@ class OverlayWindow(QWidget):
     def on_right_stick(self, stateX: float, stateY: float) -> bool:
         magnitude = math.hypot(stateX, stateY)
 
-        # Not active yet: require a stronger push before entering selection.
         if not self.right_stick_active and magnitude < self.stick_activate_threshold:
             return False
 
@@ -482,9 +692,7 @@ class OverlayWindow(QWidget):
                     self.left_used_as_modifier = True
 
             active_menu = self.right_active_menu or self.right_menu
-            hover_index = self._stick_index(
-                active_menu, stateX, stateY, self.right_candidate_index
-            )
+            hover_index = self._stick_index(active_menu, stateX, stateY, self.right_candidate_index)
 
             if hover_index != active_menu.hover_index:
                 active_menu.hover_index = hover_index
@@ -494,7 +702,6 @@ class OverlayWindow(QWidget):
             self.right_release_count = 0
             return changed
 
-        # Below release threshold.  Require several stable polls before firing.
         if not self.right_stick_active:
             return False
 
@@ -506,11 +713,7 @@ class OverlayWindow(QWidget):
         idx = self.right_candidate_index
 
         if idx is not None:
-            label = (
-                active_menu.items[idx].label
-                if 0 <= idx < len(active_menu.items)
-                else None
-            )
+            label = active_menu.items[idx].label if 0 <= idx < len(active_menu.items) else None
             print(f"[CTRL] Right select idx={idx} label={label}")
             active_menu.hover_index = idx
             active_menu.trigger_hovered()
@@ -532,11 +735,9 @@ class OverlayWindow(QWidget):
         w = self.width()
         h = self.height()
 
-        self.left_menu.set_centre(QPointF(w * 0.30, h * 0.50))
-        right_centre = QPointF(w * 0.70, h * 0.50)
+        self.left_menu.set_centre(QPointF(w * 0.28, h * 0.52))
+        right_centre = QPointF(w * 0.72, h * 0.52)
 
-        # Update every possible right-side menu, not only the one that happens
-        # to be visible during the resize event.
         self.aux_menu.set_centre(right_centre)
         for menu in self.kana_menus:
             menu.set_centre(right_centre)
@@ -552,22 +753,17 @@ class OverlayWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position()
-
         changed = False
 
-        # Update left menu hover
         old_hover = self.left_menu.hover_index
         self.left_menu.hover_index = self.left_menu.index_at(pos)
 
         if old_hover != self.left_menu.hover_index:
             changed = True
-            
-            # Switch right menu based on left menu hover
             if self.left_menu.hover_index is not None:
                 self.right_menu = self.kana_menus[self.left_menu.hover_index]
                 self.menus = [self.left_menu, self.right_menu]
 
-        # Update right menu hover
         old_hover = self.right_menu.hover_index
         self.right_menu.hover_index = self.right_menu.index_at(pos)
 
@@ -587,7 +783,6 @@ class OverlayWindow(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape:
             QApplication.quit()
-
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
@@ -597,15 +792,14 @@ class OverlayWindow(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-
     window = OverlayWindow()
 
     screen = app.primaryScreen()
     if screen:
-        window.setGeometry(screen.geometry())
+        window.position_top_right(screen.availableGeometry())
 
-    window.showFullScreen()
-
+    window.show()
+    window.raise_()
     sys.exit(app.exec())
 
 

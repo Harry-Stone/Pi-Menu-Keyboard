@@ -29,95 +29,31 @@ class KanaToken:
 
 
 class KeyboardTyper:
-    """Send keystrokes to the currently focused application/IME.
+    """Send keyboard output using ydotool only.
 
-    X11:     xdotool is preferred.
-    Wayland: ydotool is preferred because it injects through /dev/uinput.
-             wtype is also supported for wlroots-based compositors, but it is
-             usually not enough on GNOME Wayland.
+    This matches the tested Ubuntu setup:
+      - ydotool type works for normal text.
+      - ydotool key left/right/backspace works with lower-case names.
+      - ydotool key space is broken on this build and types 's', so spaces are
+        sent with ydotool type " " instead.
     """
 
-    YDOTOOL_KEYCODES = {
-        "BackSpace": 14,
-        "Left": 105,
-        "Right": 106,
-        "space": 57,
-        "Space": 57,
-        "Zenkaku_Hankaku": 85,
-    }
-
-    WTYPE_KEYNAMES = {
-        "BackSpace": "BackSpace",
-        "Left": "Left",
-        "Right": "Right",
-        "space": "space",
-        "Space": "space",
-        "Zenkaku_Hankaku": "Zenkaku_Hankaku",
+    KEYNAMES = {
+        "BackSpace": "backspace",
+        "Left": "left",
+        "Right": "right",
+        "Zenkaku_Hankaku": "zenkaku_hankaku",
     }
 
     def __init__(self):
-        self.session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
-        self.display = os.environ.get("DISPLAY", "")
-        self.wayland_display = os.environ.get("WAYLAND_DISPLAY", "")
-        self.available = {
-            "xdotool": shutil.which("xdotool") is not None,
-            "ydotool": shutil.which("ydotool") is not None,
-            "wtype": shutil.which("wtype") is not None,
-        }
-        self.backend = self._detect_backend()
+        self.available = shutil.which("ydotool") is not None
         self.warned = False
 
-        print(
-            "[KEYBOARD] session="
-            f"{self.session_type or 'unknown'} DISPLAY={self.display or '-'} "
-            f"WAYLAND_DISPLAY={self.wayland_display or '-'}"
-        )
-        print(
-            "[KEYBOARD] available backends: "
-            + ", ".join(f"{name}={yes}" for name, yes in self.available.items())
-        )
-
-        forced_backend = os.environ.get("PIE_KEYBOARD_BACKEND", "").strip().lower()
-        if forced_backend:
-            print(f"[KEYBOARD] PIE_KEYBOARD_BACKEND={forced_backend}")
-
-        if self.backend:
-            print(f"[KEYBOARD] Using {self.backend} for keyboard output")
+        if self.available:
+            print("[KEYBOARD] Using ydotool keyboard output")
+            print("[KEYBOARD] mode=type-for-text-and-space, named-key-for-controls")
         else:
-            print("[KEYBOARD] No keyboard output backend found")
-
-        if self.session_type == "wayland" and self.backend == "xdotool":
-            print(
-                "[KEYBOARD] WARNING: xdotool is X11-only. On Wayland it may "
-                "run without errors but not type into normal applications. "
-                "Use ydotool, or log into an Ubuntu on Xorg session."
-            )
-
-        if self.session_type == "wayland" and self.backend == "wtype":
-            print(
-                "[KEYBOARD] WARNING: wtype only works on compositors that "
-                "support the virtual-keyboard protocol. GNOME Wayland usually "
-                "needs ydotool instead."
-            )
-
-    def _detect_backend(self) -> Optional[str]:
-        forced = os.environ.get("PIE_KEYBOARD_BACKEND", "").strip().lower()
-        if forced:
-            if forced in self.available and self.available[forced]:
-                return forced
-            print(f"[KEYBOARD] Requested backend '{forced}' is not installed")
-
-        if self.session_type == "wayland":
-            # Prefer ydotool on Wayland because it uses uinput rather than X11.
-            for backend in ("ydotool", "wtype", "xdotool"):
-                if self.available[backend]:
-                    return backend
-        else:
-            for backend in ("xdotool", "ydotool", "wtype"):
-                if self.available[backend]:
-                    return backend
-
-        return None
+            print("[KEYBOARD] ydotool not found")
 
     def _run(self, args: list[str]) -> bool:
         try:
@@ -144,51 +80,44 @@ class KeyboardTyper:
 
     def _warn_missing_backend(self):
         if not self.warned:
-            print(
-                "[KEYBOARD] Cannot type. On X11 install xdotool. On Wayland "
-                "install/configure ydotool, or use an Ubuntu on Xorg session."
-            )
+            print("[KEYBOARD] Cannot type. Install/configure ydotool.")
             self.warned = True
 
     def type_text(self, text: str):
         if not text:
             return
 
-        if self.backend == "xdotool":
-            # --delay 10 is slightly more reliable with IMEs than a 0 ms delay.
-            self._run(["xdotool", "type", "--clearmodifiers", "--delay", "10", "--", text])
-        elif self.backend == "ydotool":
-            self._run(["ydotool", "type", text])
-        elif self.backend == "wtype":
-            self._run(["wtype", text])
-        else:
+        if not self.available:
             self._warn_missing_backend()
+            return
+
+        self._run(["ydotool", "type", text])
 
     def key(self, key_name: str, repeat: int = 1):
         if repeat <= 0:
             return
 
-        if self.backend == "xdotool":
-            self._run(["xdotool", "key", "--clearmodifiers"] + [key_name] * repeat)
-        elif self.backend == "ydotool":
-            code = self.YDOTOOL_KEYCODES.get(key_name)
-            if code is None:
-                print(f"[KEYBOARD] ydotool key not mapped: {key_name}")
-                return
-            args = ["ydotool", "key"]
-            for _ in range(repeat):
-                args.extend([f"{code}:1", f"{code}:0"])
-            self._run(args)
-        elif self.backend == "wtype":
-            key = self.WTYPE_KEYNAMES.get(key_name, key_name)
-            for _ in range(repeat):
-                self._run(["wtype", "-k", key])
-        else:
+        if not self.available:
             self._warn_missing_backend()
+            return
+
+        # Important: on this ydotool build, `ydotool key space` types `s`.
+        # Use ydotool's text path for spaces instead.
+        if key_name in {"space", "Space"}:
+            for _ in range(repeat):
+                self.type_text(" ")
+            return
+
+        key = self.KEYNAMES.get(key_name)
+        if key is None:
+            print(f"[KEYBOARD] ydotool key not mapped: {key_name}")
+            return
+
+        for _ in range(repeat):
+            self._run(["ydotool", "key", key])
 
     def backspace(self, repeat: int = 1):
         self.key("BackSpace", repeat)
-
 
 ROMAJI_TO_KANA = {
     "a": "‚ ", "i": "‚¢", "u": "‚¤", "e": "‚¦", "o": "‚¨",
@@ -205,7 +134,7 @@ ROMAJI_TO_KANA = {
     "ma": "‚Ü", "mi": "‚Ý", "mu": "‚Þ", "me": "‚ß", "mo": "‚à",
     "ya": "‚â", "yu": "‚ä", "yo": "‚æ",
     "ra": "‚ç", "ri": "‚è", "ru": "‚é", "re": "‚ê", "ro": "‚ë",
-    "wa": "‚í", "wo": "‚ð", "n": "‚ñ",
+    "wa": "‚í", "wo": "‚ð", "nn": "‚ñ",
 }
 
 DAKUTEN_MAP = {
@@ -518,7 +447,7 @@ class OverlayWindow(QWidget):
             items=[
                 PieItem("‚í", lambda: self.action("wa")),
                 PieItem("‚ð", lambda: self.action("wo")),
-                PieItem("‚ñ", lambda: self.action("n")),
+                PieItem("‚ñ", lambda: self.action("nn")),
             ],
             centre=QPointF(900, 300),
         )
